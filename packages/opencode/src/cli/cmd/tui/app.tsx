@@ -30,6 +30,7 @@ import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
 import { DialogModel, useConnected } from "@tui/component/dialog-model"
 import { DialogMcp } from "@tui/component/dialog-mcp"
+import { DialogWebSearch } from "@tui/component/dialog-websearch"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
@@ -502,6 +503,18 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
       onSelect: () => {
         dialog.replace(() => <DialogMcp />)
+      },
+    },
+    {
+      title: "Configure web search",
+      value: "websearch.configure",
+      category: "Provider",
+      slash: {
+        name: "websearch",
+        aliases: ["search-providers"],
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogWebSearch />)
       },
     },
     {

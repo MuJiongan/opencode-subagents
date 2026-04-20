@@ -335,7 +335,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
               const query = typeof data.query === "string" ? data.query : ""
               return {
                 icon: "◈",
-                title: `Exa Web Search "${query}"`,
+                title: `Web Search "${query}"`,
                 body: (
                   <Show when={query}>
                     <box paddingLeft={1}>

@@ -48,6 +48,7 @@ export const CodeSearchTool = Tool.define(
               tokensNum: params.tokensNum || 5000,
             },
             "30 seconds",
+            process.env.EXA_API_KEY,
           )
 
           return {

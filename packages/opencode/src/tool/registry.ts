@@ -44,6 +44,7 @@ import { AppFileSystem } from "@opencode-ai/shared/filesystem"
 import { Bus } from "../bus"
 import { Agent } from "../agent/agent"
 import { Skill } from "../skill"
+import { Auth } from "@/auth"
 
 const log = Log.create({ service: "tool.registry" })
 
@@ -86,6 +87,7 @@ export const layer: Layer.Layer<
   | Ripgrep.Service
   | Format.Service
   | Truncate.Service
+  | Auth.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -93,6 +95,7 @@ export const layer: Layer.Layer<
     const plugin = yield* Plugin.Service
     const skill = yield* Skill.Service
     const truncate = yield* Truncate.Service
+    const auth = yield* Auth.Service
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
@@ -250,9 +253,21 @@ export const layer: Layer.Layer<
     })
 
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+      const authData = yield* auth.all().pipe(Effect.orElseSucceed(() => ({}) as Record<string, Auth.Info>))
+      const hasParallelKey = !!authData["parallel"]
+      const hasExaKey = !!authData["exa"]
       const filtered = (yield* all()).filter((tool) => {
-        if (tool.id === CodeSearchTool.id || tool.id === WebSearchTool.id) {
-          return input.providerID === ProviderID.opencode || Flag.OPENCODE_ENABLE_EXA
+        if (tool.id === WebSearchTool.id) {
+          return (
+            input.providerID === ProviderID.opencode ||
+            Flag.OPENCODE_ENABLE_PARALLEL ||
+            Flag.OPENCODE_ENABLE_EXA ||
+            hasParallelKey ||
+            hasExaKey
+          )
+        }
+        if (tool.id === CodeSearchTool.id) {
+          return input.providerID === ProviderID.opencode || Flag.OPENCODE_ENABLE_EXA || hasExaKey
         }
 
         const usePatch =
@@ -317,5 +332,6 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(CrossSpawnSpawner.defaultLayer),
     Layer.provide(Ripgrep.defaultLayer),
     Layer.provide(Truncate.defaultLayer),
+    Layer.provide(Auth.defaultLayer),
   ),
 )

@@ -153,9 +153,12 @@ function codesearch(info: ToolProps<typeof CodeSearchTool>) {
 }
 
 function websearch(info: ToolProps<typeof WebSearchTool>) {
+  const provider = (info.metadata as { provider?: "parallel" | "exa" }).provider
+  const label =
+    provider === "parallel" ? "Parallel Web Search" : provider === "exa" ? "Exa Web Search" : "Web Search"
   inline({
     icon: "◈",
-    title: `Exa Web Search "${info.input.query}"`,
+    title: `${label} "${info.input.query}"`,
   })
 }
 

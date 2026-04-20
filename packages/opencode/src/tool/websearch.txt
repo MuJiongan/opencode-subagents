@@ -1,14 +1,13 @@
-- Search the web using Exa AI - performs real-time web searches and can scrape content from specific URLs
+- Search the web using Parallel AI (primary) with Exa as fallback — performs real-time web searches and returns LLM-optimized excerpts from the most relevant sources
 - Provides up-to-date information for current events and recent data
-- Supports configurable result counts and returns the content from the most relevant websites
+- Supports configurable result counts and excerpt length
 - Use this tool for accessing information beyond knowledge cutoff
 - Searches are performed automatically within a single API call
 
 Usage notes:
-  - Supports live crawling modes: 'fallback' (backup if cached unavailable) or 'preferred' (prioritize live crawling)
-  - Search types: 'auto' (balanced), 'fast' (quick results), 'deep' (comprehensive search)
-  - Configurable context length for optimal LLM integration
-  - Domain filtering and advanced search options available
+  - Default provider is Parallel AI when PARALLEL_API_KEY is set; otherwise falls back to Exa
+  - `livecrawl` and `type` parameters only apply to the Exa fallback provider
+  - `numResults` and `contextMaxCharacters` apply to both providers
 
 The current year is {{year}}. You MUST use this year when searching for recent information or current events
 - Example: If the current year is 2026 and the user asks for "latest AI news", search for "AI news 2026", NOT "AI news 2025"

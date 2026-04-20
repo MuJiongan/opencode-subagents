@@ -1935,10 +1935,12 @@ function CodeSearch(props: ToolProps<typeof CodeSearchTool>) {
 }
 
 function WebSearch(props: ToolProps<typeof WebSearchTool>) {
-  const metadata = props.metadata as { numResults?: number }
+  const metadata = props.metadata as { numResults?: number; provider?: "parallel" | "exa" }
+  const label =
+    metadata.provider === "parallel" ? "Parallel Web Search" : metadata.provider === "exa" ? "Exa Web Search" : "Web Search"
   return (
     <InlineTool icon="◈" pending="Searching web..." complete={props.input.query} part={props.part}>
-      Exa Web Search "{props.input.query}" <Show when={metadata.numResults}>({metadata.numResults} results)</Show>
+      {label} "{props.input.query}" <Show when={metadata.numResults}>({metadata.numResults} results)</Show>
     </InlineTool>
   )
 }
