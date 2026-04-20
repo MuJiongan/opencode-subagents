@@ -14,7 +14,12 @@ export const TraceCommand = cmd({
   builder: (yargs: Argv) =>
     yargs
       .positional("sessionID", { describe: "root session id", type: "string" })
-      .option("out", { describe: "path to write HTML (default: stdout)", type: "string" }),
+      .option("out", { describe: "path to write HTML (default: stdout)", type: "string" })
+      .option("scope-to-turn", {
+        describe: "only include subagents spawned in each session's most recent activation",
+        type: "boolean",
+        default: false,
+      }),
   handler: async (args) => {
     await bootstrap(process.cwd(), async () => {
       let sessionID = args.sessionID ? SessionID.make(args.sessionID) : undefined
@@ -50,7 +55,7 @@ export const TraceCommand = cmd({
       }
 
       try {
-        const { html } = await renderTraceHtml(sessionID)
+        const { html } = await renderTraceHtml(sessionID, { scopeToTurn: args["scope-to-turn"] as boolean })
         if (args.out) {
           await fs.writeFile(args.out, html, "utf8")
           process.stderr.write(`Wrote trace to ${args.out}\n`)

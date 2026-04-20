@@ -45,13 +45,8 @@ export const InstanceBootstrap = Effect.gen(function* () {
   )
 
   // Auto-open HTML trace when a root session finishes a turn that spawned subagents.
-  // Disabled by setting OPENCODE_AUTO_TRACE=0; also disabled under CI/tests.
-  if (
-    process.env.OPENCODE_AUTO_TRACE !== "0" &&
-    process.env.CI !== "true" &&
-    process.env.NODE_ENV !== "test" &&
-    process.env.BUN_ENV !== "test"
-  ) {
+  // Disabled by setting OPENCODE_AUTO_TRACE=0.
+  if (process.env.OPENCODE_AUTO_TRACE !== "0") {
     yield* Bus.Service.use((bus) =>
       bus.subscribeCallback(SessionStatus.Event.Idle, async (payload) => {
         const sessionID = payload.properties.sessionID
@@ -61,11 +56,20 @@ export const InstanceBootstrap = Effect.gen(function* () {
           const messages = await AppRuntime.runPromise(
             Session.Service.use((s) => s.messages({ sessionID })),
           ).catch(() => [] as never[])
-          const lastAssistant = [...messages].reverse().find((m) => m.info.role === "assistant")
-          if (!lastAssistant) return
-          const spawnedSubagent = lastAssistant.parts.some((p) => p.type === "tool" && p.tool === "task")
+          // Scan assistants since the last user message — the orchestrator often appends a final
+          // text-only message after a subagent returns, so the very last assistant has no task call.
+          let lastUserIdx = -1
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].info.role === "user") {
+              lastUserIdx = i
+              break
+            }
+          }
+          const spawnedSubagent = messages
+            .slice(lastUserIdx + 1)
+            .some((m) => m.info.role === "assistant" && m.parts.some((p) => p.type === "tool" && p.tool === "task"))
           if (!spawnedSubagent) return
-          const filepath = await writeAndOpenTrace(sessionID)
+          const filepath = await writeAndOpenTrace(sessionID, { scopeToTurn: true })
           process.stderr.write(`\n[auto-trace] ${filepath}\n`)
           Log.Default.info("auto-trace opened", { sessionID, filepath })
         } catch (err) {

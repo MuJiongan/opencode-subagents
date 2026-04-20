@@ -29,6 +29,16 @@ type TreeNode = {
   tool_calls: ToolCallSummary[]
   children: TreeNode[]
   turns: number
+  // Step within the parent's spawn order (1-based). Children sharing the same step were
+  // emitted in the same assistant message — i.e. dispatched as a parallel batch.
+  spawn_step: number
+  spawn_batch_size: number
+  spawn_batch_index: number
+  // USD spent in this session alone (sum of its assistant messages' cost field).
+  self_cost: number
+  // self_cost + every descendant's subtree_cost — the total cost of this branch.
+  subtree_cost: number
+  self_tokens: { input: number; output: number; cache_read: number; cache_write: number; reasoning: number }
 }
 
 type ToolCallSummary = {
@@ -41,17 +51,65 @@ type ToolCallSummary = {
   child_session_id?: string
 }
 
-async function collectTree(rootID: SessionID): Promise<Map<string, SessionBundle>> {
+// Returns the set of child session IDs spawned by `task` tool calls in the session's
+// most recent activation — the messages after its last user message. Used when scoping
+// a trace to the just-finished turn so we don't pull in subagents from earlier turns
+// (orchestrator reused across turns, or a subagent resumed via task_id).
+function currentTurnChildren(messages: MessageV2.WithParts[]): Set<string> {
+  let lastUserIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].info.role === "user") {
+      lastUserIdx = i
+      break
+    }
+  }
+  const out = new Set<string>()
+  for (const m of messages.slice(lastUserIdx + 1)) {
+    if (m.info.role !== "assistant") continue
+    for (const p of m.parts) {
+      if (p.type !== "tool" || p.tool !== "task") continue
+      const cid = (p.state as any)?.metadata?.sessionId
+      if (typeof cid === "string") out.add(cid)
+    }
+  }
+  return out
+}
+
+function sliceToLastActivation(messages: MessageV2.WithParts[]): MessageV2.WithParts[] {
+  let lastUserIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].info.role === "user") {
+      lastUserIdx = i
+      break
+    }
+  }
+  return lastUserIdx < 0 ? messages : messages.slice(lastUserIdx)
+}
+
+async function collectTree(
+  rootID: SessionID,
+  options?: { scopeToTurn?: boolean; rootChildFilter?: ReadonlySet<string> },
+): Promise<Map<string, SessionBundle>> {
   const bundles = new Map<string, SessionBundle>()
-  async function walk(id: SessionID) {
+  async function walk(id: SessionID, isRoot: boolean) {
     if (bundles.has(id)) return
     const info = await AppRuntime.runPromise(Session.Service.use((s) => s.get(id)))
-    const messages = await AppRuntime.runPromise(Session.Service.use((s) => s.messages({ sessionID: id })))
+    const full = await AppRuntime.runPromise(Session.Service.use((s) => s.messages({ sessionID: id })))
+    // When scoping to the current turn, every node's details (tool calls, result, turn count)
+    // must also be computed off the same slice — otherwise clicking a reused session's card
+    // would show tool calls from its prior activations.
+    const messages = options?.scopeToTurn ? sliceToLastActivation(full) : full
     bundles.set(id, { info, messages })
     const kids = await AppRuntime.runPromise(Session.Service.use((s) => s.children(id)))
-    for (const kid of kids) await walk(kid.id)
+    const explicit = isRoot ? options?.rootChildFilter : undefined
+    const auto = options?.scopeToTurn ? currentTurnChildren(messages) : undefined
+    for (const kid of kids) {
+      if (explicit && !explicit.has(kid.id)) continue
+      if (!explicit && auto && !auto.has(kid.id)) continue
+      await walk(kid.id, false)
+    }
   }
-  await walk(rootID)
+  await walk(rootID, true)
   return bundles
 }
 
@@ -108,6 +166,8 @@ function findSpawningCall(
   allowed_tools: string[] | null
   prompt_received: string
   system_prompt_override: string
+  spawning_message_id: string | undefined
+  spawning_message_time: number
 } {
   const fallback = {
     role: "root",
@@ -115,6 +175,8 @@ function findSpawningCall(
     allowed_tools: null as string[] | null,
     prompt_received: "",
     system_prompt_override: "",
+    spawning_message_id: undefined as string | undefined,
+    spawning_message_time: 0,
   }
   if (!parentBundle) return fallback
   for (const m of parentBundle.messages) {
@@ -131,6 +193,8 @@ function findSpawningCall(
         allowed_tools: Array.isArray(input.allowed_tools) ? input.allowed_tools : null,
         prompt_received: typeof input.prompt === "string" ? input.prompt : "",
         system_prompt_override: typeof input.system_prompt === "string" ? input.system_prompt : "",
+        spawning_message_id: m.info.id,
+        spawning_message_time: m.info.time?.created ?? 0,
       }
     }
   }
@@ -139,6 +203,28 @@ function findSpawningCall(
 
 function countTurns(msgs: MessageV2.WithParts[]): number {
   return msgs.filter((m) => m.info.role === "user").length
+}
+
+function computeSelfUsage(msgs: MessageV2.WithParts[]): {
+  cost: number
+  tokens: { input: number; output: number; cache_read: number; cache_write: number; reasoning: number }
+} {
+  let cost = 0
+  const tokens = { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 }
+  for (const m of msgs) {
+    if (m.info.role !== "assistant") continue
+    const info = m.info as any
+    if (typeof info.cost === "number") cost += info.cost
+    const t = info.tokens
+    if (t) {
+      tokens.input += t.input ?? 0
+      tokens.output += t.output ?? 0
+      tokens.reasoning += t.reasoning ?? 0
+      tokens.cache_read += t.cache?.read ?? 0
+      tokens.cache_write += t.cache?.write ?? 0
+    }
+  }
+  return { cost, tokens }
 }
 
 function buildTreeNode(
@@ -172,12 +258,19 @@ function buildTreeNode(
           return "unknown"
         })()
 
+  const usage = computeSelfUsage(messages)
   const tool_calls = summarizeToolCalls(messages)
-  const children = tool_calls
+  const childIds = tool_calls
     .map((t) => t.child_session_id)
     .filter((x): x is string => !!x)
     .filter((cid) => bundles.has(cid))
-    .map((cid) => buildTreeNode(bundles, cid, bundle))
+  const children = childIds.map((cid) => buildTreeNode(bundles, cid, bundle))
+  // Annotate children with batch info: those spawned in the same parent assistant message
+  // were dispatched as a parallel tool-call batch. Distinct messages are sequential steps.
+  annotateBatches(
+    children,
+    childIds.map((cid) => findSpawningCall(bundle, cid).spawning_message_id),
+  )
 
   const agent = (lastAssistant?.info as any)?.agent ?? "—"
   const model =
@@ -202,6 +295,38 @@ function buildTreeNode(
     tool_calls,
     children,
     turns: countTurns(messages),
+    // Defaults are safe for the root; the parent's annotateBatches overwrites these for children.
+    spawn_step: 1,
+    spawn_batch_size: 1,
+    spawn_batch_index: 1,
+    self_cost: usage.cost,
+    self_tokens: usage.tokens,
+    subtree_cost: usage.cost + children.reduce((sum, c) => sum + c.subtree_cost, 0),
+  }
+}
+
+function annotateBatches(children: TreeNode[], spawningMsgIds: (string | undefined)[]): void {
+  if (children.length === 0) return
+  // children is in spawn order (tool_calls preserves message order). Bucket by spawning
+  // message id; each bucket = one parallel batch (one step).
+  let stepCounter = 0
+  let currentMsgId: string | undefined = undefined
+  for (let i = 0; i < children.length; i++) {
+    const mid = spawningMsgIds[i]
+    if (mid !== currentMsgId) {
+      stepCounter += 1
+      currentMsgId = mid
+    }
+    children[i].spawn_step = stepCounter
+  }
+  const stepSizes = new Map<number, number>()
+  const stepCursor = new Map<number, number>()
+  for (const c of children) stepSizes.set(c.spawn_step, (stepSizes.get(c.spawn_step) ?? 0) + 1)
+  for (const c of children) {
+    const idx = (stepCursor.get(c.spawn_step) ?? 0) + 1
+    stepCursor.set(c.spawn_step, idx)
+    c.spawn_batch_size = stepSizes.get(c.spawn_step)!
+    c.spawn_batch_index = idx
   }
 }
 
@@ -220,6 +345,29 @@ function statusColor(status: string): string {
   }
 }
 
+function formatCost(usd: number): string {
+  if (usd <= 0) return "$0"
+  if (usd < 0.01) return `$${usd.toFixed(4)}`
+  if (usd < 1) return `$${usd.toFixed(3)}`
+  return `$${usd.toFixed(2)}`
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
+  return `${(n / 1_000_000).toFixed(1)}M`
+}
+
+function formatCostTooltip(node: TreeNode): string {
+  const childCost = node.subtree_cost - node.self_cost
+  const lines = [
+    `subtree total: ${formatCost(node.subtree_cost)}`,
+    `this session: ${formatCost(node.self_cost)}`,
+  ]
+  if (childCost > 0) lines.push(`subagents: ${formatCost(childCost)}`)
+  return lines.join(" · ")
+}
+
 function escapeHtml(value: unknown): string {
   if (value === undefined || value === null) return ""
   const s = typeof value === "string" ? value : String(value)
@@ -231,25 +379,46 @@ function escapeHtml(value: unknown): string {
     .replace(/'/g, "&#39;")
 }
 
-function renderRow(node: TreeNode, depth: number, lastSiblingMask: boolean[]): string {
+function renderRow(
+  node: TreeNode,
+  depth: number,
+  lastSiblingMask: boolean[],
+  parentHasMultipleSteps: boolean,
+): string {
   const toolCount = node.tool_calls.filter((t) => t.tool !== "task").length
   const sub = node.children.length
   const badge = `<span class="badge badge-${statusColor(node.status)}">${escapeHtml(node.status)}</span>`
+  const isParallel = node.spawn_batch_size > 1
+  // Connector style: parallel siblings get a doubled (accent) connector; sequential siblings stay single.
+  const sideClass = isParallel ? "guide-col-par" : ""
+  const tipClass = isParallel
+    ? lastSiblingMask[depth - 1]
+      ? "guide-col-par-last"
+      : "guide-col-par-mid"
+    : lastSiblingMask[depth - 1]
+      ? "guide-col-last"
+      : "guide-col-mid"
 
-  // build the ascii-style guide prefix using box-drawing characters
-  // for each ancestor level: "│  " if that ancestor has more siblings after it, "   " if it's the last
-  // for the current level: "├─ " normally, "└─ " if this row is the last child of its parent
   let guide = ""
   for (let i = 0; i < depth - 1; i++) {
     guide += `<span class="guide-col ${lastSiblingMask[i] ? "guide-col-empty" : "guide-col-bar"}"></span>`
   }
   if (depth > 0) {
-    guide += `<span class="guide-col ${lastSiblingMask[depth - 1] ? "guide-col-last" : "guide-col-mid"}"></span>`
+    guide += `<span class="guide-col ${tipClass} ${sideClass}"></span>`
   }
   const hasChildren = sub > 0
   const caret = hasChildren
     ? `<button class="caret" data-id="${escapeHtml(node.id)}" aria-label="toggle" type="button">▾</button>`
     : `<span class="caret-spacer"></span>`
+
+  // Spawn-mode chip on the row: "par k/N" for parallel batches; "step K" only when the
+  // parent has multiple sequential steps (so a single-batch parent stays uncluttered).
+  let modeChip = ""
+  if (isParallel) {
+    modeChip = `<span class="mode-chip mode-par" title="dispatched in parallel with siblings">⫴ par ${node.spawn_batch_index}/${node.spawn_batch_size}</span>`
+  } else if (parentHasMultipleSteps) {
+    modeChip = `<span class="mode-chip mode-seq" title="ran sequentially as step ${node.spawn_step}">→ step ${node.spawn_step}</span>`
+  }
 
   const row = `
     <div class="row" data-depth="${depth}" data-id="${escapeHtml(node.id)}">
@@ -258,21 +427,25 @@ function renderRow(node: TreeNode, depth: number, lastSiblingMask: boolean[]): s
       <span class="status-dot status-${statusColor(node.status)}" title="${escapeHtml(node.status)}"></span>
       <button class="card-btn" data-id="${escapeHtml(node.id)}" type="button">
         <span class="role">@${escapeHtml(node.role)}</span>
+        ${modeChip}
         <span class="desc">${escapeHtml(node.description || node.id.slice(-8))}</span>
         <span class="stats">
           <span title="tool calls">🔧 ${toolCount}</span>
           <span title="subagents">🧵 ${sub}</span>
           <span title="turns">💬 ${node.turns}</span>
+          ${node.subtree_cost > 0 ? `<span class="cost-chip" title="${escapeHtml(formatCostTooltip(node))}">💰 ${escapeHtml(formatCost(node.subtree_cost))}</span>` : ""}
           ${badge}
         </span>
       </button>
     </div>
   `
 
+  const distinctSteps = new Set(node.children.map((c) => c.spawn_step)).size
+  const childHasMultipleSteps = distinctSteps > 1
   const childRows = node.children
     .map((c, i) => {
       const isLast = i === node.children.length - 1
-      return renderRow(c, depth + 1, [...lastSiblingMask, isLast])
+      return renderRow(c, depth + 1, [...lastSiblingMask, isLast], childHasMultipleSteps)
     })
     .join("")
 
@@ -351,6 +524,22 @@ const STYLES = `
   }
   .guide-col-empty { /* spacing only */ }
 
+  /* parallel batch connectors: doubled accent line so the eye groups parallel siblings */
+  .guide-col-par-mid::before {
+    content: ""; position: absolute; left: 7px; top: 0; bottom: 0; width: 4px;
+    border-left: 1px solid var(--accent); border-right: 1px solid var(--accent);
+  }
+  .guide-col-par-mid::after {
+    content: ""; position: absolute; left: 11px; top: 50%; width: 9px; border-top: 1px solid var(--accent);
+  }
+  .guide-col-par-last::before {
+    content: ""; position: absolute; left: 7px; top: 0; height: 50%; width: 4px;
+    border-left: 1px solid var(--accent); border-right: 1px solid var(--accent);
+  }
+  .guide-col-par-last::after {
+    content: ""; position: absolute; left: 11px; top: 50%; width: 9px; border-top: 1px solid var(--accent);
+  }
+
   .caret, .caret-spacer {
     width: 16px; height: 16px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
     background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 10px; padding: 0;
@@ -378,6 +567,33 @@ const STYLES = `
   .card-btn .role { color: var(--accent); font-weight: 600; font-size: 13px; flex-shrink: 0; }
   .card-btn .desc { color: var(--fg); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; opacity: 0.85; }
   .card-btn .stats { display: flex; gap: 8px; font-size: 11px; color: var(--muted); flex-shrink: 0; align-items: center; }
+
+  /* spawn-mode chip: tells you whether a subagent ran in parallel with siblings or sequentially */
+  .mode-chip {
+    flex-shrink: 0; font-size: 10px; padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, monospace;
+    letter-spacing: 0.02em; line-height: 1.4;
+  }
+  .mode-par { background: var(--accent-soft); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+  .mode-seq { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+
+  /* cost chip in tree row stats */
+  .cost-chip {
+    background: color-mix(in srgb, var(--ok) 18%, transparent);
+    color: color-mix(in srgb, var(--ok) 85%, var(--fg));
+    padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 10px;
+    cursor: help;
+  }
+
+  /* step header inside the modal's "subagents spawned" section */
+  .step-header {
+    display: flex; align-items: center; gap: 10px; padding: 6px 4px; margin-top: 6px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .step-header .step-label { font-weight: 700; color: var(--fg); }
+  .step-par .step-mode { color: var(--accent); }
+  .step-seq .step-mode { color: var(--muted); }
+  /* role chip inside a task item summary */
+  .tool-role { color: var(--accent); font-weight: 600; font-size: 11px; font-family: ui-monospace, monospace; }
 
   .subtree.hidden { display: none; }
 
@@ -454,6 +670,18 @@ const CLIENT_SCRIPT = `
             .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  function formatCostJS(usd) {
+    if (!usd || usd <= 0) return "$0";
+    if (usd < 0.01) return "$" + usd.toFixed(4);
+    if (usd < 1) return "$" + usd.toFixed(3);
+    return "$" + usd.toFixed(2);
+  }
+  function formatTokensJS(n) {
+    if (!n || n < 1000) return String(n || 0);
+    if (n < 1000000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + "k";
+    return (n / 1000000).toFixed(1) + "M";
+  }
+
   function renderDetail(node) {
     const allowedChips = node.inherited_tools
       ? '<span class="empty">inherited from agent permissions (no explicit allowlist)</span>'
@@ -477,16 +705,33 @@ const CLIENT_SCRIPT = `
       );
     }).join("");
 
-    const spawnItems = node.tool_calls.filter(t => t.tool === 'task').map(t => {
+    // Group spawned subagents by step. Same step (= same parent assistant message)
+    // means the LLM dispatched them in parallel; different steps run sequentially.
+    const spawnTasks = node.tool_calls.filter(t => t.tool === 'task');
+    const groups = []; // [{ step, size, items: [t,...] }]
+    const groupByStep = new Map();
+    let fallbackStep = 0;
+    for (const t of spawnTasks) {
+      const child = t.child_session_id ? NODES[t.child_session_id] : null;
+      const step = child ? child.spawn_step : (++fallbackStep);
+      let g = groupByStep.get(step);
+      if (!g) { g = { step, items: [] }; groupByStep.set(step, g); groups.push(g); }
+      g.items.push({ t, child });
+    }
+    for (const g of groups) g.size = g.items.length;
+    const showStepHeaders = groups.length > 1 || (groups[0] && groups[0].size > 1);
+
+    const renderTaskItem = (t, child) => {
       const cid = t.child_session_id;
       const childExists = cid && NODES[cid];
       const btn = childExists
         ? '<button class="btn-open-child" data-child="' + escapeHtml(cid) + '">open subagent →</button>'
         : '';
       const statusBadge = '<span class="badge badge-' + t.status + '">' + escapeHtml(t.status) + '</span>';
+      const role = child && child.role ? '<span class="tool-role">@' + escapeHtml(child.role) + '</span>' : '';
       return (
         '<details class="tool-item">' +
-          '<summary><code class="tool-name">task</code>' +
+          '<summary><code class="tool-name">task</code>' + role +
           '<span class="tool-title">' + escapeHtml(t.title) + '</span>' +
           statusBadge + btn + '</summary>' +
           '<div class="tool-body">' +
@@ -495,6 +740,18 @@ const CLIENT_SCRIPT = `
           '</div>' +
         '</details>'
       );
+    };
+
+    const spawnItems = groups.map(g => {
+      const items = g.items.map(({t, child}) => renderTaskItem(t, child)).join("");
+      if (!showStepHeaders) return items;
+      const isParallel = g.size > 1;
+      const header =
+        '<div class="step-header ' + (isParallel ? 'step-par' : 'step-seq') + '">' +
+          '<span class="step-label">Step ' + g.step + '</span>' +
+          '<span class="step-mode">' + (isParallel ? '⫴ ' + g.size + ' subagents in parallel' : '→ sequential') + '</span>' +
+        '</div>';
+      return header + items;
     }).join("");
 
     return (
@@ -508,6 +765,20 @@ const CLIENT_SCRIPT = `
           '<dt>model</dt><dd><code>' + escapeHtml(node.model) + '</code></dd>' +
           '<dt>session id</dt><dd><code>' + escapeHtml(node.id) + '</code></dd>' +
           (node.parentID ? '<dt>parent id</dt><dd><code>' + escapeHtml(node.parentID) + '</code> <button class="btn-open-child" data-child="' + escapeHtml(node.parentID) + '">open parent →</button></dd>' : '') +
+        '</dl>' +
+      '</div>' +
+      '<div class="section">' +
+        '<h3>cost &amp; tokens</h3>' +
+        '<dl class="kv-grid">' +
+          '<dt>subtree total</dt><dd><strong>' + escapeHtml(formatCostJS(node.subtree_cost)) + '</strong>' +
+            (node.children.length > 0 ? ' <span style="color:var(--muted)">(self ' + escapeHtml(formatCostJS(node.self_cost)) + ' + subagents ' + escapeHtml(formatCostJS(node.subtree_cost - node.self_cost)) + ')</span>' : '') +
+          '</dd>' +
+          '<dt>input tokens</dt><dd>' + escapeHtml(formatTokensJS(node.self_tokens.input)) + '</dd>' +
+          '<dt>output tokens</dt><dd>' + escapeHtml(formatTokensJS(node.self_tokens.output)) + '</dd>' +
+          (node.self_tokens.reasoning > 0 ? '<dt>reasoning tokens</dt><dd>' + escapeHtml(formatTokensJS(node.self_tokens.reasoning)) + '</dd>' : '') +
+          (node.self_tokens.cache_read > 0 || node.self_tokens.cache_write > 0
+            ? '<dt>cache (read / write)</dt><dd>' + escapeHtml(formatTokensJS(node.self_tokens.cache_read)) + ' / ' + escapeHtml(formatTokensJS(node.self_tokens.cache_write)) + '</dd>'
+            : '') +
         '</dl>' +
       '</div>' +
       '<div class="section">' +
@@ -607,14 +878,17 @@ function flattenNodes(root: TreeNode, acc: Record<string, TreeNode> = {}): Recor
   return acc
 }
 
-export async function renderTraceHtml(rootID: SessionID): Promise<{ html: string; title: string }> {
-  const bundles = await collectTree(rootID)
+export async function renderTraceHtml(
+  rootID: SessionID,
+  options?: { scopeToTurn?: boolean; rootChildFilter?: ReadonlySet<string> },
+): Promise<{ html: string; title: string }> {
+  const bundles = await collectTree(rootID, options)
   if (!bundles.has(rootID)) throw new Error(`Session not found: ${rootID}`)
   const tree = buildTreeNode(bundles, rootID)
   const flat = flattenNodes(tree)
   const title = bundles.get(rootID)!.info.title ?? rootID
 
-  const renderedTree = renderRow(tree, 0, [])
+  const renderedTree = renderRow(tree, 0, [], false)
 
   const html = `<!doctype html>
 <html lang="en">
@@ -626,7 +900,7 @@ export async function renderTraceHtml(rootID: SessionID): Promise<{ html: string
 <body>
   <header class="toolbar">
     <h1>🧵 Subagent trace</h1>
-    <span class="meta">${escapeHtml(title)} · ${Object.keys(flat).length} session(s) · generated ${new Date().toLocaleString()}</span>
+    <span class="meta">${escapeHtml(title)} · ${Object.keys(flat).length} session(s) · ${escapeHtml(formatCost(tree.subtree_cost))} · generated ${new Date().toLocaleString()}</span>
   </header>
 
   <main class="tree-wrap">
@@ -659,8 +933,11 @@ export async function renderTraceHtml(rootID: SessionID): Promise<{ html: string
  * Writes a session trace to a temp HTML file and opens it in the default browser.
  * Returns the file path. Silently swallows browser-open errors (returns path regardless).
  */
-export async function writeAndOpenTrace(rootID: SessionID): Promise<string> {
-  const { html } = await renderTraceHtml(rootID)
+export async function writeAndOpenTrace(
+  rootID: SessionID,
+  options?: { scopeToTurn?: boolean; rootChildFilter?: ReadonlySet<string> },
+): Promise<string> {
+  const { html } = await renderTraceHtml(rootID, options)
   const dir = path.join(os.tmpdir(), "opencode-trace")
   await fs.mkdir(dir, { recursive: true })
   const filepath = path.join(dir, `${rootID}-${Date.now()}.html`)
