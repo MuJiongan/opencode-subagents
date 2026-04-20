@@ -301,7 +301,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
             }
 
             if (permission === "task") {
-              const type = typeof data.subagent_type === "string" ? data.subagent_type : "Unknown"
+              const type = typeof data.role === "string" ? data.role : "Unknown"
               const desc = typeof data.description === "string" ? data.description : ""
               return {
                 icon: "#",

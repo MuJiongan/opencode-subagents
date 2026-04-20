@@ -101,6 +101,8 @@ const live: Layer.Layer<
         [
           // use agent prompt otherwise provider prompt
           ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
+          // agent-level addendum (does not replace the base prompt)
+          ...(input.agent.promptAppend ? [input.agent.promptAppend] : []),
           // any custom prompt passed into this call
           ...input.system,
           // any custom prompt from last user message
