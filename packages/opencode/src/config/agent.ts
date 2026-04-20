@@ -37,6 +37,10 @@ const AgentSchema = Schema.StructWithRest(
     temperature: Schema.optional(Schema.Number),
     top_p: Schema.optional(Schema.Number),
     prompt: Schema.optional(Schema.String),
+    promptAppend: Schema.optional(Schema.String).annotate({
+      description:
+        "Extra system prompt appended after the base prompt (does not replace it). Use for orchestrator-style addenda on primary agents that should keep the provider's default chat prompt.",
+    }),
     tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
       description: "@deprecated Use 'permission' field instead",
     }),
@@ -64,6 +68,7 @@ const KNOWN_KEYS = new Set([
   "model",
   "variant",
   "prompt",
+  "promptAppend",
   "description",
   "temperature",
   "top_p",

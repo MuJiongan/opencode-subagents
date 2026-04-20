@@ -107,85 +107,6 @@ function reply(input: SessionPrompt.PromptInput, text: string): MessageV2.WithPa
 }
 
 describe("tool.task", () => {
-  it.live("description sorts subagents by name and is stable across calls", () =>
-    provideTmpdirInstance(
-      () =>
-        Effect.gen(function* () {
-          const agent = yield* Agent.Service
-          const build = yield* agent.get("build")
-          const registry = yield* ToolRegistry.Service
-          const get = Effect.fnUntraced(function* () {
-            const tools = yield* registry.tools({ ...ref, agent: build })
-            return tools.find((tool) => tool.id === TaskTool.id)?.description ?? ""
-          })
-          const first = yield* get()
-          const second = yield* get()
-
-          expect(first).toBe(second)
-
-          const alpha = first.indexOf("- alpha: Alpha agent")
-          const explore = first.indexOf("- explore:")
-          const general = first.indexOf("- general:")
-          const zebra = first.indexOf("- zebra: Zebra agent")
-
-          expect(alpha).toBeGreaterThan(-1)
-          expect(explore).toBeGreaterThan(alpha)
-          expect(general).toBeGreaterThan(explore)
-          expect(zebra).toBeGreaterThan(general)
-        }),
-      {
-        config: {
-          agent: {
-            zebra: {
-              description: "Zebra agent",
-              mode: "subagent",
-            },
-            alpha: {
-              description: "Alpha agent",
-              mode: "subagent",
-            },
-          },
-        },
-      },
-    ),
-  )
-
-  it.live("description hides denied subagents for the caller", () =>
-    provideTmpdirInstance(
-      () =>
-        Effect.gen(function* () {
-          const agent = yield* Agent.Service
-          const build = yield* agent.get("build")
-          const registry = yield* ToolRegistry.Service
-          const description =
-            (yield* registry.tools({ ...ref, agent: build })).find((tool) => tool.id === TaskTool.id)?.description ?? ""
-
-          expect(description).toContain("- alpha: Alpha agent")
-          expect(description).not.toContain("- zebra: Zebra agent")
-        }),
-      {
-        config: {
-          permission: {
-            task: {
-              "*": "allow",
-              zebra: "deny",
-            },
-          },
-          agent: {
-            zebra: {
-              description: "Zebra agent",
-              mode: "subagent",
-            },
-            alpha: {
-              description: "Alpha agent",
-              mode: "subagent",
-            },
-          },
-        },
-      },
-    ),
-  )
-
   it.live("execute resumes an existing task session from task_id", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
@@ -201,7 +122,7 @@ describe("tool.task", () => {
           {
             description: "inspect bug",
             prompt: "look into the cache key path",
-            subagent_type: "general",
+            role: "cache investigator",
             task_id: child.id,
           },
           {
@@ -240,7 +161,7 @@ describe("tool.task", () => {
             {
               description: "inspect bug",
               prompt: "look into the cache key path",
-              subagent_type: "general",
+              role: "cache investigator",
             },
             {
               sessionID: chat.id,
@@ -263,11 +184,11 @@ describe("tool.task", () => {
         expect(calls).toHaveLength(1)
         expect(calls[0]).toEqual({
           permission: "task",
-          patterns: ["general"],
+          patterns: ["cache investigator"],
           always: ["*"],
           metadata: {
             description: "inspect bug",
-            subagent_type: "general",
+            role: "cache investigator",
           },
         })
       }),
@@ -288,7 +209,7 @@ describe("tool.task", () => {
           {
             description: "inspect bug",
             prompt: "look into the cache key path",
-            subagent_type: "general",
+            role: "cache investigator",
             task_id: "ses_missing",
           },
           {
@@ -328,7 +249,7 @@ describe("tool.task", () => {
             {
               description: "inspect bug",
               prompt: "look into the cache key path",
-              subagent_type: "reviewer",
+              role: "cache investigator",
             },
             {
               sessionID: chat.id,
@@ -345,40 +266,150 @@ describe("tool.task", () => {
           const child = yield* sessions.get(result.metadata.sessionId)
           expect(child.parentID).toBe(chat.id)
           expect(child.permission).toEqual([
-            {
-              permission: "todowrite",
-              pattern: "*",
-              action: "deny",
-            },
-            {
-              permission: "bash",
-              pattern: "*",
-              action: "allow",
-            },
-            {
-              permission: "read",
-              pattern: "*",
-              action: "allow",
-            },
+            { permission: "task", pattern: "*", action: "deny" },
+            { permission: "bash", pattern: "*", action: "allow" },
+            { permission: "read", pattern: "*", action: "allow" },
           ])
-          expect(seen?.tools).toEqual({
-            todowrite: false,
-            bash: false,
-            read: false,
-          })
+          expect(seen?.tools).toEqual({})
+        }),
+      {
+        config: {
+          experimental: {
+            primary_tools: ["bash", "read"],
+          },
+        },
+      },
+    ),
+  )
+
+  it.live("execute narrows child permissions when allowed_tools is provided", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            role: "security reviewer",
+            allowed_tools: ["read", "grep"],
+            system_prompt: "Only report findings, do not modify files.",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.parentID).toBe(chat.id)
+        expect(child.title).toContain("(@security reviewer)")
+        expect(child.permission).toEqual([
+          { permission: "task", pattern: "*", action: "deny" },
+          { permission: "*", pattern: "*", action: "deny" },
+          { permission: "read", pattern: "*", action: "allow" },
+          { permission: "grep", pattern: "*", action: "allow" },
+        ])
+        expect(seen?.tools).toEqual({})
+        expect(seen?.system).toBe(
+          "You are operating in the role of: security reviewer.\n\nOnly report findings, do not modify files.",
+        )
+      }),
+    ),
+  )
+
+  it.live("execute lets a subagent delegate task to spawn sub-subagents", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const promptOps = stubOps()
+
+        const result = yield* def.execute(
+          {
+            description: "mid tier",
+            prompt: "orchestrate a sub-search",
+            role: "mid orchestrator",
+            allowed_tools: ["read", "grep", "task"],
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+        const ruleset = child.permission ?? []
+        // last-match-wins: task is allowed for this subagent
+        const taskRule = ruleset.findLast((r) => r.permission === "task" || r.permission === "*")
+        expect(taskRule?.action).toBe("allow")
+        expect(taskRule?.permission).toBe("task")
+      }),
+    ),
+  )
+
+  it.live("execute rejects allowed_tools the caller does not own", () =>
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const { chat, assistant } = yield* seed()
+          const tool = yield* TaskTool
+          const def = yield* tool.init()
+          const promptOps = stubOps()
+
+          const result = yield* def
+            .execute(
+              {
+                description: "try to escalate",
+                prompt: "this should fail",
+                role: "escalator",
+                allowed_tools: ["read", "write"],
+              },
+              {
+                sessionID: chat.id,
+                messageID: assistant.id,
+                agent: "build",
+                abort: new AbortController().signal,
+                extra: { promptOps },
+                messages: [],
+                metadata: () => Effect.void,
+                ask: () => Effect.void,
+              },
+            )
+            .pipe(Effect.exit)
+
+          expect(result._tag).toBe("Failure")
         }),
       {
         config: {
           agent: {
-            reviewer: {
-              mode: "subagent",
+            build: {
               permission: {
+                "*": "deny",
+                read: "allow",
+                grep: "allow",
                 task: "allow",
               },
             },
-          },
-          experimental: {
-            primary_tools: ["bash", "read"],
           },
         },
       },

@@ -9,6 +9,7 @@ import { Auth } from "../auth"
 import { ProviderTransform } from "../provider"
 
 import PROMPT_GENERATE from "./generate.txt"
+import PROMPT_BUILD from "./prompt/build.txt"
 import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
@@ -43,6 +44,7 @@ export const Info = z
       .optional(),
     variant: z.string().optional(),
     prompt: z.string().optional(),
+    promptAppend: z.string().optional(),
     options: z.record(z.string(), z.any()),
     steps: z.number().int().positive().optional(),
   })
@@ -108,7 +110,7 @@ export const layer = Layer.effect(
         const agents: Record<string, Info> = {
           build: {
             name: "build",
-            description: "The default agent. Executes tools based on configured permissions.",
+            description: "The default orchestrator agent. Delegates environment work to subagents.",
             options: {},
             permission: Permission.merge(
               defaults,
@@ -120,6 +122,7 @@ export const layer = Layer.effect(
             ),
             mode: "primary",
             native: true,
+            promptAppend: PROMPT_BUILD,
           },
           plan: {
             name: "plan",
@@ -250,6 +253,7 @@ export const layer = Layer.effect(
           if (value.model) item.model = Provider.parseModel(value.model)
           item.variant = value.variant ?? item.variant
           item.prompt = value.prompt ?? item.prompt
+          item.promptAppend = value.promptAppend ?? item.promptAppend
           item.description = value.description ?? item.description
           item.temperature = value.temperature ?? item.temperature
           item.topP = value.top_p ?? item.topP

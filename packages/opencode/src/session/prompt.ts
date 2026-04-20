@@ -562,7 +562,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           input: {
             prompt: task.prompt,
             description: task.description,
-            subagent_type: task.agent,
+            role: task.agent,
             command: task.command,
           },
           time: { start: Date.now() },
@@ -571,7 +571,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const taskArgs = {
         prompt: task.prompt,
         description: task.description,
-        subagent_type: task.agent,
+        role: task.agent,
         command: task.command,
       }
       yield* plugin.trigger(
@@ -598,7 +598,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           sessionID,
           abort: taskAbort.signal,
           callID: part.callID,
-          extra: { bypassAgentCheck: true, promptOps },
+          extra: { bypassAgentCheck: true, promptOps, subagentAgent: task.agent },
           messages: msgs,
           metadata: (val: { title?: string; metadata?: Record<string, any> }) =>
             Effect.gen(function* () {

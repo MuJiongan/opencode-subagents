@@ -550,7 +550,7 @@ it.live("failed subtask preserves metadata on error tool state", () =>
       yield* llm.tool("task", {
         description: "inspect bug",
         prompt: "look into the cache key path",
-        subagent_type: "general",
+        role: "general",
       })
       yield* llm.text("done")
       const msg = yield* user(chat.id, "hello")
@@ -643,7 +643,7 @@ it.live(
         yield* llm.tool("task", {
           description: "inspect bug",
           prompt: "look into the cache key path",
-          subagent_type: "general",
+          role: "general",
         })
         yield* llm.hang
         yield* user(chat.id, "hello")

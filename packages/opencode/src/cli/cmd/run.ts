@@ -162,17 +162,16 @@ function websearch(info: ToolProps<typeof WebSearchTool>) {
 function task(info: ToolProps<typeof TaskTool>) {
   const input = info.part.state.input
   const status = info.part.state.status
-  const subagent =
-    typeof input.subagent_type === "string" && input.subagent_type.trim().length > 0 ? input.subagent_type : "unknown"
-  const agent = Locale.titlecase(subagent)
+  const roleRaw = typeof input.role === "string" && input.role.trim().length > 0 ? input.role : "subagent"
+  const role = Locale.titlecase(roleRaw)
   const desc =
     typeof input.description === "string" && input.description.trim().length > 0 ? input.description : undefined
   const icon = status === "error" ? "✗" : status === "running" ? "•" : "✓"
-  const name = desc ?? `${agent} Task`
+  const name = desc ?? `${role} Task`
   inline({
     icon,
     title: name,
-    description: desc ? `${agent} Agent` : undefined,
+    description: desc ? `${role} Agent` : undefined,
   })
 }
 
