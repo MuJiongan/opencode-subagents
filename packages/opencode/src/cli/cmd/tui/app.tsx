@@ -46,6 +46,7 @@ import { FrecencyProvider } from "./component/prompt/frecency"
 import { PromptStashProvider } from "./component/prompt/stash"
 import { DialogAlert } from "./ui/dialog-alert"
 import { DialogConfirm } from "./ui/dialog-confirm"
+import { DialogPrompt } from "./ui/dialog-prompt"
 import { ToastProvider, useToast } from "./ui/toast"
 import { ExitProvider, useExit } from "./context/exit"
 import { Session as SessionApi } from "@/session"
@@ -557,6 +558,43 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         dialog.replace(() => <DialogProviderList />)
       },
       category: "Provider",
+    },
+    {
+      title: "Set Parallel API key",
+      value: "parallel.connect",
+      slash: {
+        name: "parallel",
+      },
+      category: "Provider",
+      onSelect: () => {
+        dialog.replace(() => (
+          <DialogPrompt
+            title="Parallel API key"
+            placeholder="Paste your Parallel AI API key"
+            description={() => (
+              <box gap={1}>
+                <text fg={theme.textMuted}>
+                  Parallel AI powers the web search tool. Get a key at https://platform.parallel.ai
+                </text>
+              </box>
+            )}
+            onConfirm={async (value) => {
+              const key = value?.trim()
+              if (!key) return
+              const { error } = await sdk.client.auth.set({
+                providerID: "parallel",
+                auth: { type: "api", key },
+              })
+              if (error) {
+                toast.show({ message: "Failed to save API key", variant: "error" })
+                return
+              }
+              toast.show({ message: "Parallel API key saved", variant: "info" })
+              dialog.clear()
+            }}
+          />
+        ))
+      },
     },
     ...(sync.data.console_state.switchableOrgCount > 1
       ? [
