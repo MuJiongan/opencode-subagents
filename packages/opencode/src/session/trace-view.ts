@@ -41,17 +41,56 @@ type ToolCallSummary = {
   child_session_id?: string
 }
 
+function latestTurnSlice(msgs: MessageV2.WithParts[]): MessageV2.WithParts[] {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].info.role === "user") return msgs.slice(i)
+  }
+  return msgs
+}
+
+function spawnedChildIDs(msgs: MessageV2.WithParts[]): string[] {
+  const ids: string[] = []
+  for (const m of msgs) {
+    if (m.info.role !== "assistant") continue
+    for (const p of m.parts) {
+      if (p.type !== "tool" || p.tool !== "task") continue
+      const meta = (p.state as any)?.metadata ?? {}
+      if (typeof meta?.sessionId === "string") ids.push(meta.sessionId)
+    }
+  }
+  return ids
+}
+
+/**
+ * Collect a session bundle for the root and every descendant actually spawned
+ * in the root's *latest* turn. Scoping to the latest turn prevents prior turns'
+ * subagents (all of which share parent_id=rootID in the DB) from spilling into
+ * the tree. Subagent sessions keep all their messages since each is created
+ * fresh per spawn.
+ */
 async function collectTree(rootID: SessionID): Promise<Map<string, SessionBundle>> {
   const bundles = new Map<string, SessionBundle>()
-  async function walk(id: SessionID) {
-    if (bundles.has(id)) return
-    const info = await AppRuntime.runPromise(Session.Service.use((s) => s.get(id)))
-    const messages = await AppRuntime.runPromise(Session.Service.use((s) => s.messages({ sessionID: id })))
-    bundles.set(id, { info, messages })
-    const kids = await AppRuntime.runPromise(Session.Service.use((s) => s.children(id)))
-    for (const kid of kids) await walk(kid.id)
+  const rootInfo = await AppRuntime.runPromise(Session.Service.use((s) => s.get(rootID)))
+  const rootMessages = await AppRuntime.runPromise(Session.Service.use((s) => s.messages({ sessionID: rootID })))
+  bundles.set(rootID, { info: rootInfo, messages: latestTurnSlice(rootMessages) })
+
+  async function walk(parentMsgs: MessageV2.WithParts[]) {
+    for (const cid of spawnedChildIDs(parentMsgs)) {
+      if (bundles.has(cid)) continue
+      try {
+        const childID = cid as SessionID
+        const info = await AppRuntime.runPromise(Session.Service.use((s) => s.get(childID)))
+        const messages = await AppRuntime.runPromise(
+          Session.Service.use((s) => s.messages({ sessionID: childID })),
+        )
+        bundles.set(cid, { info, messages })
+        await walk(messages)
+      } catch {
+        // child session missing / removed — skip
+      }
+    }
   }
-  await walk(rootID)
+  await walk(bundles.get(rootID)!.messages)
   return bundles
 }
 
