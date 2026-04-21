@@ -1938,7 +1938,7 @@ function WebSearch(props: ToolProps<typeof WebSearchTool>) {
   const metadata = props.metadata as { numResults?: number }
   return (
     <InlineTool icon="◈" pending="Searching web..." complete={props.input.query} part={props.part}>
-      Exa Web Search "{props.input.query}" <Show when={metadata.numResults}>({metadata.numResults} results)</Show>
+      Web Search "{props.input.query}" <Show when={metadata.numResults}>({metadata.numResults} results)</Show>
     </InlineTool>
   )
 }

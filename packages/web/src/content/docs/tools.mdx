@@ -257,14 +257,7 @@ Allows the LLM to fetch and read web pages. Useful for looking up documentation 
 Search the web for information.
 
 :::note
-This tool is only available when using the OpenCode provider or when the `OPENCODE_ENABLE_EXA` environment variable is set to any truthy value (e.g., `true` or `1`).
-
-To enable when launching OpenCode:
-
-```bash
-OPENCODE_ENABLE_EXA=1 opencode
-```
-
+A Parallel AI API key is required. Set it once in the TUI with `/parallel` (stored in `auth.json`) or export `PARALLEL_API_KEY`. Get a key at [platform.parallel.ai](https://platform.parallel.ai).
 :::
 
 ```json title="opencode.json" {4}
@@ -276,7 +269,7 @@ OPENCODE_ENABLE_EXA=1 opencode
 }
 ```
 
-Performs web searches using Exa AI to find relevant information online. Useful for researching topics, finding current events, or gathering information beyond the training data cutoff.
+Performs web searches using [Parallel AI](https://parallel.ai) to find relevant information online. Useful for researching topics, finding current events, or gathering information beyond the training data cutoff.
 
 No API key is required — the tool connects directly to Exa AI's hosted MCP service without authentication.
 
